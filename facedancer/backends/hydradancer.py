@@ -757,19 +757,8 @@ class HydradancerBoard():
         Thus, self.ep_status should always be in sync with the endpoint's status on the boards.
         """
         try:
-            # Use the endpoint type that best fits the type of request :
-            # -> for control requests, polling using ctrl transfers garanties the fastest status update.
-            #     Latency is key in the enumeration phase
-            # -> for bulk requests, polling using bulk transfers allows for more status updates to be sent,
-            #    thus increasing the speed
-            #  TODO : what about interrupt or isochronous transfers ?
-
-            if not self.configured:
-                read = self.device.ctrl_transfer(
-                    CTRL_TYPE_VENDOR | CTRL_RECIPIENT_DEVICE | CTRL_IN, self.GET_EVENT, data_or_wLength=self.events, timeout=self.timeout_ms_poll)
-            else:
-                read = self.ep_poll.read(
-                    self.events, timeout=self.timeout_ms_poll*10)
+            read = self.ep_poll.read(
+                self.events, timeout=self.timeout_ms_poll*10)
             if read >= 2:
                 events = []
                 for i in range(0, read, 2):
