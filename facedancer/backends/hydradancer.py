@@ -1,7 +1,18 @@
 """
 Backend for the Hydradancer boards.
 
-Supports 5 endpoints, with addresses between 0 and 7. Supports low, full and high-speed.
+Supports 6 endpoints, with addresses between 0 and 15. Supports low, full and high-speed.
+
+NOTE: 
+Due to a limitation of the WCH569 USB2 controller (they use the same peripheral registers), 
+the following endpoint numbers cannot be used in the same device configuration:
+* EP1 and EP9
+* EP2 and EP10
+* EP3 and EP11
+* EP4, EP8 and EP12
+* EP5 and EP13
+* EP6 and EP14
+* EP7 and EP15
 """
 
 import sys
