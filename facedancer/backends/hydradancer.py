@@ -30,15 +30,15 @@ class HydradancerEvent:
     EVENT_OUT_BUFFER_AVAILABLE = 0x2
     EVENT_NAK = 0x3
 
-    event_type : int = -1
+    type : int = -1
     value : int = -1
 
     @staticmethod
     def from_bytes(data : bytes):
-        return HydradancerEvent(event_type = data[0], value = data[1])
+        return HydradancerEvent(type = data[0], value = data[1])
 
     def __repr__(self):
-        return f"event_type {self.event_type} value {self.value}"
+        return f"type {self.type} value {self.value}"
 
 
 class HydradancerHostApp(FacedancerApp, FacedancerBackend):
@@ -202,7 +202,16 @@ class HydradancerHostApp(FacedancerApp, FacedancerBackend):
         Args:
             endpoint_number : The number of the OUT endpoint on which data is to be rx'd.
         """
-        return self.api.read(endpoint_number, blocking=True)
+        if blocking:
+            while not self.api.out_buffer_available(ep_num):
+                events = self.api.fetch_events()
+                for event in events:
+                    self.process_events()
+        return self.api.read(endpoint_number)
+
+    def wait_buffer_empty(self,ep_num):
+        while not self.api.in_buffer_empty(ep_num):
+            self.process_events()
 
     def send_on_endpoint(self, endpoint_number: int, data: bytes, blocking: bool=True):
         """
@@ -222,12 +231,14 @@ class HydradancerHostApp(FacedancerApp, FacedancerBackend):
         max_packet_size = self.max_ep0_packet_size if endpoint_number == 0 else self.ep_in[endpoint_number].max_packet_size
 
         if not data:
+            self.wait_buffer_empty(endpoint_number)
             self.api.send(endpoint_number, data)
 
         while data:
             packet = data[0:max_packet_size]
             data = data[len(packet):]
             logging.debug(f"Sending {len(packet)} on ep {endpoint_number}")
+            self.wait_buffer_empty(endpoint_number)
             self.api.send(endpoint_number, packet)
 
         # Many things to take into account here ...
@@ -237,6 +248,7 @@ class HydradancerHostApp(FacedancerApp, FacedancerBackend):
         # however, this could add too much latency and make enumeration fail
         if endpoint_number == 0 and (backup_len % max_packet_size) == 0 and backup_len > 0 and backup_len != self.current_setup_req.length:
             logging.debug(f"Sending ZLP")
+            self.wait_buffer_empty(endpoint_number)
             self.api.send(endpoint_number, b"") # Sending ZLP
 
     def ack_status_stage(self, direction: USBDirection=USBDirection.OUT, endpoint_number:int =0, blocking: bool=False):
@@ -285,25 +297,6 @@ class HydradancerHostApp(FacedancerApp, FacedancerBackend):
         logging.debug(f"Clearing halt for endpoint {endpoint_number}")
         self.api.clear_halt(endpoint_number, direction)
 
-    def service_irqs(self):
-        """
-        Core routine of the Facedancer execution/event loop. Continuously monitors the
-        Facedancer's execution status, and reacts as events occur.
-        """
-        events = self.api.fetch_events()
-
-        if events is not None:
-            for event in events:
-                if event is None:
-                    continue
-                if event.event_type == HydradancerEvent.EVENT_BUS_RESET:
-                    self.handle_bus_reset()
-                if event.event_type == HydradancerEvent.EVENT_IN_BUFFER_AVAILABLE and event.value != 0 and (event.value in self.ep_in.keys()):
-                    self.connected_device.handle_buffer_empty(self.ep_in[event.value])
-
-        self.handle_control_request()
-        self.handle_data_endpoints()
-
     def handle_bus_reset(self):
         """
         Triggers Hydradancer to perform its side of a bus reset.
@@ -313,33 +306,32 @@ class HydradancerHostApp(FacedancerApp, FacedancerBackend):
         else:
             self.reset()
 
-    def handle_data_endpoints(self):
+    def handle_in_data_endpoint(self, ep_num : int):
         """
-        Handle IN or OUT requests on non-control endpoints.
+        Handle IN requests on non-control endpoints.
         """
+        if self.api.in_buffer_empty(ep_num) and self.api.nak_on_endpoint(ep_num):
+            if len(self.ep_transfer_queue[ep_num]) != 0:
+                max_packet_size = self.ep_in[ep_num].max_packet_size
+                packet = self.ep_transfer_queue[ep_num][0][0:max_packet_size]
+                self.ep_transfer_queue[ep_num][0] = self.ep_transfer_queue[ep_num][0][len(packet):]
+                self.wait_buffer_empty(ep_num)
+                self.api.send(ep_num, packet)
 
-        # process ep OUT firsts, transfer is dictated by the host, if there is data available on an ep OUT,
-        # it should be processed before setting new IN data
-        for ep_num in self.ep_out:
-            if self.api.out_buffer_available(ep_num):
-                data = self.api.read(ep_num)
-                if data is not None:
-                    self.connected_device.handle_data_available(
-                        ep_num, data.tobytes())
+                if len(self.ep_transfer_queue[ep_num][0]) == 0:
+                    self.ep_transfer_queue[ep_num].pop(0)
+            else:
+                self.connected_device.handle_nak(ep_num)
 
-        for ep_num, ep in self.ep_in.items():
-            if self.api.in_buffer_empty(ep_num) and self.api.nak_on_endpoint(ep_num):
-                if len(self.ep_transfer_queue[ep_num]) != 0:
-                    max_packet_size = ep.max_packet_size
-                    packet = self.ep_transfer_queue[ep_num][0][0:max_packet_size]
-                    self.ep_transfer_queue[ep_num][0] = self.ep_transfer_queue[ep_num][0][len(packet):]
-
-                    self.api.send(ep_num, packet)
-
-                    if len(self.ep_transfer_queue[ep_num][0]) == 0:
-                        self.ep_transfer_queue[ep_num].pop(0)
-                else:
-                    self.connected_device.handle_nak(ep_num)
+    def handle_out_data_endpoint(self, ep_num : int):
+        """
+        Handle OUT requests on non-control endpoints.
+        """
+        if self.api.out_buffer_available(ep_num):
+            data = self.api.read(ep_num)
+            if data is not None:
+                self.connected_device.handle_data_available(
+                    ep_num, data.tobytes())
 
     def handle_control_request(self):
         if not self.api.control_buffer_available():
@@ -381,8 +373,28 @@ class HydradancerHostApp(FacedancerApp, FacedancerBackend):
         elif len(data) == 0:
             logging.debug("Received ACK for IN Ctrl req")
 
+    def process_events(self):
+        for event in self.api.fetch_events():
+            if event is None:
+                continue
+            elif event.type == HydradancerEvent.EVENT_BUS_RESET:
+                self.handle_bus_reset()
+            elif event.type == HydradancerEvent.EVENT_IN_BUFFER_AVAILABLE and event.value != 0 and (event.value in self.ep_in.keys()):
+                self.connected_device.handle_buffer_empty(self.ep_in[event.value])
+            elif event.type == HydradancerEvent.EVENT_OUT_BUFFER_AVAILABLE:
+                if event.value != 0:
+                    self.handle_out_data_endpoint(event.value)
+                else:
+                    self.handle_control_request()
+            elif event.value != 0 and (event.type == HydradancerEvent.EVENT_IN_BUFFER_AVAILABLE or event.type == HydradancerEvent.EVENT_NAK):
+                self.handle_in_data_endpoint(event.value)
 
-
+    def service_irqs(self):
+        """
+        Core routine of the Facedancer execution/event loop. Continuously monitors the
+        Facedancer's execution status, and reacts as events occur.
+        """
+        self.process_events()
 
 class HydradancerBoardFatalError(Exception):
     pass
@@ -692,8 +704,6 @@ class HydradancerBoard():
         Prime target endpoint ep_num.
         """
         try:
-            while not self.in_buffer_empty(ep_num):
-                events = self.fetch_events()
             logging.debug(f"Sending len {len(data)} {data} on ep {ep_num}")
             self.ep_out[self.endpoints_mapping[ep_num]].write(
                 data)
@@ -702,15 +712,12 @@ class HydradancerBoard():
         except (usb.core.USBTimeoutError, usb.core.USBError):
             logging.error(f"could not send data on ep {ep_num}")
 
-    def read(self, ep_num, blocking=False):
+    def read(self, ep_num):
         """
         Read from target endpoint ep_num. If blocking=True, wait until the endpoint's buffer is full.
         """
         logging.debug(f"reading from ep {ep_num}")
         try:
-            if blocking:
-                while not self.out_buffer_available(ep_num):
-                    self.fetch_events()
             if self.out_buffer_available(ep_num):
                 read = self.ep_in[self.endpoints_mapping[ep_num]].read(
                     self.MAX_PACKET_SIZE)
@@ -769,17 +776,17 @@ class HydradancerBoard():
                     event = HydradancerEvent.from_bytes(self.events[i:i+2])
                     events.append(event)
                     logging.debug(event)
-                    if event.event_type == HydradancerEvent.EVENT_IN_BUFFER_AVAILABLE:
+                    if event.type == HydradancerEvent.EVENT_IN_BUFFER_AVAILABLE:
                         self.hydradancer_status["ep_in_status"] |= (0x1 << event.value) & 0xff
-                    elif event.event_type == HydradancerEvent.EVENT_OUT_BUFFER_AVAILABLE:
+                    elif event.type == HydradancerEvent.EVENT_OUT_BUFFER_AVAILABLE:
                         self.hydradancer_status["ep_out_status"] |= (0x1 << event.value) & 0xff
-                    elif event.event_type == HydradancerEvent.EVENT_NAK:
+                    elif event.type == HydradancerEvent.EVENT_NAK:
                         self.hydradancer_status["ep_in_nak"] |= (0x1 << event.value) & 0xff
                 logging.debug(f"Hydradancer status {self.hydradancer_status}")
                 return events
-            return None
+            return []
         except usb.core.USBTimeoutError:
-            return None
+            return []
         except usb.core.USBError as exception:
             logging.error(exception)
             raise HydradancerBoardFatalError("USB Error while fetching events") from exception
