@@ -391,7 +391,8 @@ class HydradancerHostApp(FacedancerApp, FacedancerBackend):
             elif event.type == HydradancerEvent.EVENT_BUS_RESET:
                 self.handle_bus_reset()
             elif event.type == HydradancerEvent.EVENT_IN_BUFFER_AVAILABLE and event.value != 0 and (event.value in self.ep_in.keys()):
-                self.connected_device.handle_buffer_empty(self.ep_in[event.value])
+                if self.api.in_buffer_empty(event.value):
+                    self.connected_device.handle_buffer_empty(self.ep_in[event.value])
             elif event.type == HydradancerEvent.EVENT_OUT_BUFFER_AVAILABLE:
                 if event.value != 0:
                     self.handle_out_data_endpoint(event.value)
@@ -399,6 +400,11 @@ class HydradancerHostApp(FacedancerApp, FacedancerBackend):
                     self.handle_control_request()
             elif event.value != 0 and (event.type == HydradancerEvent.EVENT_IN_BUFFER_AVAILABLE or event.type == HydradancerEvent.EVENT_NAK):
                 self.handle_in_data_endpoint(event.value)
+                
+        for ep_num, ep in self.ep_in.items():
+            if self.api.in_buffer_empty(ep_num):
+                self.connected_device.handle_buffer_empty(self.ep_in[ep_num])
+                self.handle_in_data_endpoint(ep_num)
 
     def service_irqs(self):
         """
