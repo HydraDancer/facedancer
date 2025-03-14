@@ -321,7 +321,7 @@ class HydradancerHostApp(FacedancerApp, FacedancerBackend):
         """
         Handle IN requests on non-control endpoints.
         """
-        if self.api.in_buffer_empty(ep_num) and self.api.nak_on_endpoint(ep_num):
+        if self.api.nak_on_endpoint(ep_num) and self.api.in_buffer_empty(ep_num):
             if len(self.ep_transfer_queue[ep_num]) != 0:
                 max_packet_size = self.ep_in[ep_num].max_packet_size
                 packet = self.ep_transfer_queue[ep_num][0][0:max_packet_size]
@@ -392,7 +392,17 @@ class HydradancerHostApp(FacedancerApp, FacedancerBackend):
                 self.handle_bus_reset()
             elif event.type == HydradancerEvent.EVENT_IN_BUFFER_AVAILABLE and event.value != 0 and (event.value in self.ep_in.keys()):
                 if self.api.in_buffer_empty(event.value):
-                    self.connected_device.handle_buffer_empty(self.ep_in[event.value])
+                    if len(self.ep_transfer_queue[event.value]) != 0:
+                        max_packet_size = self.ep_in[event.value].max_packet_size
+                        packet = self.ep_transfer_queue[event.value][0][0:max_packet_size]
+                        self.ep_transfer_queue[event.value][0] = self.ep_transfer_queue[event.value][0][len(packet):]
+                        self.wait_buffer_empty(event.value)
+                        self.api.send(event.value, packet)
+
+                        if len(self.ep_transfer_queue[event.value][0]) == 0:
+                            self.ep_transfer_queue[event.value].pop(0)
+                    else:
+                        self.connected_device.handle_buffer_empty(self.ep_in[event.value])
             elif event.type == HydradancerEvent.EVENT_OUT_BUFFER_AVAILABLE:
                 if event.value != 0:
                     self.handle_out_data_endpoint(event.value)
